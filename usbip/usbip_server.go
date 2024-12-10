@@ -1,16 +1,20 @@
 package usbip
 
 import (
+	"context"
 	"net"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bulwarkid/virtual-fido/util"
 )
 
-var usbipLogger = util.NewLogger("[USBIP] ", util.LogLevelTrace)
-var errLogger = util.NewLogger("[ERR] ", util.LogLevelEnabled)
+var (
+	usbipLogger = util.NewLogger("[USBIP] ", util.LogLevelTrace)
+	errLogger   = util.NewLogger("[ERR] ", util.LogLevelEnabled)
+)
 
 type USBIPServer struct {
 	devices []USBIPDevice
@@ -22,16 +26,29 @@ func NewUSBIPServer(devices []USBIPDevice) *USBIPServer {
 	return server
 }
 
-func (server *USBIPServer) Start() {
+func (server *USBIPServer) Start(ctx context.Context) {
 	usbipLogger.Println("Starting USBIP server...")
 	listener, err := net.Listen("tcp", ":3240")
 	util.CheckErr(err, "Could not create listener")
+	var connection net.Conn
+	go func() {
+		<-ctx.Done()
+		listener.Close()
+		if connection != nil {
+			connection.SetReadDeadline(time.Now())
+			connection.Close()
+		}
+	}()
 	for {
-		connection, err := listener.Accept()
+		if ctx.Err() != nil {
+			return
+		}
+		conn, err := listener.Accept()
 		if err != nil {
 			usbipLogger.Printf("Connection accept error: %v", err)
 			continue
 		}
+		connection = conn
 		if !strings.HasPrefix(connection.RemoteAddr().String(), "127.0.0.1") {
 			usbipLogger.Printf("Connection attempted from non-local address: %s", connection.RemoteAddr().String())
 			connection.Close()
@@ -78,7 +95,7 @@ func (conn *usbipConnection) handle() {
 		if header.Command == usbipCommandOpReqDevlist {
 			reply := newOpRepDevlist(conn.server.devices)
 			usbipLogger.Printf("[OP_REP_DEVLIST] %#v\n\n", reply)
-			conn.writeResponse(util.ToBE(reply))
+			conn.writeResponse(reply.AsBEBytes())
 		} else if header.Command == usbipCommandOpReqImport {
 			busIDData := util.Read(conn.conn, 32)
 			busID := util.CStringToString(busIDData)
